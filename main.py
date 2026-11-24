@@ -49,7 +49,7 @@ threading.Thread(target=keep_alive, daemon=True).start()
 # ------------------------------------------------------------------
 TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 # IDs المسموح لها تستخدم البوت (مفصولة بفاصلة). لو فاضي = الكل مسموح.
 ALLOWED = {
