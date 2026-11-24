@@ -21,7 +21,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from nphies_codes import NPHIES_CODES
 
-TOKEN = os.environ.get("BOT_TOKEN")
+TOKEN = os.environ.get("BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
 
 conn = sqlite3.connect("team.db", check_same_thread=False)
 cur = conn.cursor()
@@ -44,21 +44,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def parse_fhir(text):
     try:
         data = json.loads(text)
-        for entry in data.get("entry", []):
-            res = entry.get("resource", {})
-            if res.get("resourceType") == "ClaimResponse":
-                outcome = res.get("outcome", "")
-                disposition = res.get("disposition", "")
-                code = ""
-                if res.get("error"):
-                    code = res["error"][0].get("code", {}).get("coding", [{}])[0].get("code", "")
-                claim_no = ""
-                if res.get("request"):
-                    claim_no = res["request"].get("identifier", {}).get("value", "")
-                return {"claim_no": claim_no, "outcome": outcome, "disposition": disposition, "code": code}
     except:
         return None
-    return None
+
+    # لو JSON واحد مش Bundle
+    resources = []
+    if isinstance(data, dict):
+        if "entry" in data:
+            for entry in data.get("entry", []):
+                if isinstance(entry, dict) and "resource" in entry:
+                    resources.append(entry["resource"])
+        elif "resourceType" in data:
+            resources.append(data)
+    elif isinstance(data, list):
+        resources = data
+
+    if not resources:
+        return None
+
+    # 1. ClaimResponse - زي القديم
+    for res in resources:
+        if res.get("resourceType") == "ClaimResponse":
+            outcome = res.get("outcome", "")
+            disposition = res.get("disposition", "")
+            code = ""
+            if res.get("error"):
+                try:
+                    code = res["error"][0].get("code", {}).get("coding", [{}])[0].get("code", "")
+                except:
+                    pass
+            claim_no = ""
+            if res.get("request"):
+                claim_no = res["request"].get("identifier", {}).get("value", "")
+            # اسم شركة التأمين لو موجود
+            payer = "من JSON"
+            if res.get("insurer"):
+                payer = res["insurer"].get("display", payer)
+            return {"type": "claim", "claim_no": claim_no, "payer": payer, "outcome": outcome, "disposition": disposition, "code": code}
+
+    # 2. Organization - ده اللي انت بعته
+    orgs = [r for r in resources if r.get("resourceType") == "Organization"]
+    if orgs:
+        lines = []
+        for o in orgs[:10]:
+            name = ""
+            if o.get("name"):
+                name = o["name"]
+            elif o.get("identifier"):
+                name = str(o["identifier"][0].get("value", ""))
+            lic = ""
+            for ident in o.get("identifier", []):
+                if "license" in str(ident.get("type", "")).lower() or ident.get("system", "").endswith("license"):
+                    lic = ident.get("value", "")
+            lines.append(f"- {name} | ترخيص: {lic or 'غير موجود'}")
+        return {"type": "orgs", "text": "\n".join(lines), "count": len(orgs)}
+
+    # 3. Claim عادي
+    for res in resources:
+        if res.get("resourceType") == "Claim":
+            return {"type": "claim", "claim_no": res.get("id", ""), "payer": "من JSON", "outcome": "Claim", "disposition": res.get("status", ""), "code": ""}
+
+    return {"type": "unknown", "count": len(resources), "types": ", ".join(set([r.get("resourceType", "?") for r in resources]))}
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
@@ -66,18 +112,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.effective_user.first_name
     if text.strip().startswith("{"):
         result = parse_fhir(text)
-        if result:
+        if result and result.get("type") == "claim":
             code = result["code"]
-            info = NPHIES_CODES.get(code, {"ar": "كود جديد", "fix": "هيتم تسجيله"})
+            info = NPHIES_CODES.get(code, {"ar": "كود جديد", "fix": "هيتم تسجيله"}) if code else {"ar": "-", "fix": "-"}
             cur.execute("INSERT INTO claims (user_id, user_name, claim_no, payer, outcome, disposition, code) VALUES (?,?,?,?,?,?,?)",
-                        (user_id, name, result["claim_no"], "من JSON", result["outcome"], result["disposition"], code))
+                        (user_id, name, result["claim_no"], result.get("payer", "من JSON"), result["outcome"], result["disposition"], code))
             conn.commit()
             await update.message.reply_text(
-                f"📋 تحليل المطالبة:\n\nرقم المطالبة: {result['claim_no']}\nالنتيجة: {result['outcome']}\nالسبب: {result['disposition']}\nكود نفيس: {code}\nمعناه: {info['ar']}\nالحل: {info['fix']}\n\n✅ اتسجل باسم: {name}"
+                f"📋 تحليل المطالبة:\n\nرقم المطالبة: {result['claim_no']}\nشركة التأمين: {result.get('payer','')}\nالنتيجة: {result['outcome']}\nالسبب: {result['disposition']}\nكود نفيس: {code}\nمعناه: {info['ar']}\nالحل: {info['fix']}\n\n✅ اتسجل باسم: {name}"
             )
             return
+        elif result and result.get("type") == "orgs":
+            await update.message.reply_text(
+                f"🏢 لقيت {result['count']} شركة تأمين في الـ JSON:\n\n{result['text']}\n\nده ملف تعريف شركات مش رد مطالبة، عشان كده مفيش قبول/رفض هنا."
+            )
+            return
+        elif result and result.get("type") == "unknown":
+            await update.message.reply_text(f"فهمت الـ JSON بس نوعه {result['types']} ومش رد مطالبة. ابعتلي ClaimResponse عشان أحلله.")
+            return
         else:
-            await update.message.reply_text("مش قادر أفهم الـ JSON ده")
+            await update.message.reply_text("مش قادر أفهم الـ JSON ده، اتأكد انه كامل مش متقطع")
             return
     await update.message.reply_text("ابعتلي JSON أو Excel أو /code رقم الكود")
 
